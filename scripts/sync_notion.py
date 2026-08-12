@@ -11,7 +11,7 @@ DATA_SOURCE_ID = os.environ["NOTION_DATA_SOURCE_ID"]
 
 headers = {
     "Authorization": f"Bearer {NOTION_TOKEN}",
-    "Notion-Version": "2025-09-03",
+    "Notion-Version": "2026-03-11",
     "Content-Type": "application/json",
 }
 
@@ -66,7 +66,7 @@ def safe_for_public(title):
 def main():
     today = datetime.now(ZoneInfo("Asia/Kolkata")).date().isoformat()
     url = f"https://api.notion.com/v1/data_sources/{DATA_SOURCE_ID}/query"
-    body = {"page_size": 100}
+    body = {"page_size": 100, "result_type": "page"}
     pages = []
     cursor = None
 
@@ -74,7 +74,8 @@ def main():
         if cursor:
             body["start_cursor"] = cursor
         r = requests.post(url, headers=headers, json=body, timeout=30)
-        r.raise_for_status()
+        if not r.ok:
+            raise RuntimeError(f"Notion API {r.status_code}: {r.text}")
         data = r.json()
         pages.extend(data.get("results", []))
         if not data.get("has_more"):
