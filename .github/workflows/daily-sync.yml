@@ -32,9 +32,12 @@ jobs:
 
       - name: Commit daily activity
         id: publish
+        env:
+          GIT_COMMIT_EMAIL: ${{ secrets.GIT_COMMIT_EMAIL }}
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          test -n "$GIT_COMMIT_EMAIL"
+          git config user.name "MaybeSomeone-arc18"
+          git config user.email "$GIT_COMMIT_EMAIL"
           git add .
           if git diff --cached --quiet; then
             echo "No approved activity to publish."
