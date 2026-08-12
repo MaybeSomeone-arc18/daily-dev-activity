@@ -31,13 +31,23 @@ jobs:
         run: python scripts/sync_notion.py
 
       - name: Commit daily activity
+        id: publish
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add .
           if git diff --cached --quiet; then
             echo "No approved activity to publish."
+            echo "published=false" >> "$GITHUB_OUTPUT"
           else
             git commit -m "chore: daily activity $(date -u +%Y-%m-%d)"
             git push
+            echo "published=true" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Mark published tasks in Notion
+        if: steps.publish.outputs.published == 'true'
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATA_SOURCE_ID: df67ff53-c724-410e-bced-b3627f1cbf0c
+        run: python scripts/mark_published.py
