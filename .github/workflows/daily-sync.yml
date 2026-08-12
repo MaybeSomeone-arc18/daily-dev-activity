@@ -1,0 +1,43 @@
+name: Daily Notion Activity Sync
+
+on:
+  schedule:
+    # 11:00 PM IST = 17:30 UTC
+    - cron: '30 17 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Sync approved Notion tasks
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATA_SOURCE_ID: df67ff53-c724-410e-bced-b3627f1cbf0c
+        run: python scripts/sync_notion.py
+
+      - name: Commit daily activity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .
+          if git diff --cached --quiet; then
+            echo "No approved activity to publish."
+          else
+            git commit -m "chore: daily activity $(date -u +%Y-%m-%d)"
+            git push
+          fi
