@@ -1,7 +1,8 @@
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -10,11 +11,10 @@ DATA_SOURCE_ID = os.environ["NOTION_DATA_SOURCE_ID"]
 
 headers = {
     "Authorization": f"Bearer {NOTION_TOKEN}",
-    "Notion-Version": "2022-06-28",
+    "Notion-Version": "2025-09-03",
     "Content-Type": "application/json",
 }
 
-# Conservative safety filter. Explicit approval is still required in Notion.
 PRIVATE_PATTERNS = [
     r"\brelationship\b", r"\bgirlfriend\b", r"\bboyfriend\b", r"\bromantic\b",
     r"\bfamily\b", r"\bmom\b", r"\bdad\b", r"\bsister\b", r"\bbrother\b",
@@ -36,8 +36,7 @@ PUBLIC_PATTERNS = [
 
 
 def rich_text_title(page):
-    props = page.get("properties", {})
-    title = props.get("Task", {}).get("title", [])
+    title = page.get("properties", {}).get("Task", {}).get("title", [])
     return "".join(x.get("plain_text", "") for x in title).strip()
 
 
@@ -53,6 +52,10 @@ def prop_value(props, name):
     return None
 
 
+def task_date(props):
+    return ((props.get("Date") or {}).get("date") or {}).get("start")
+
+
 def safe_for_public(title):
     text = title.lower()
     if any(re.search(pattern, text) for pattern in PRIVATE_PATTERNS):
@@ -61,7 +64,7 @@ def safe_for_public(title):
 
 
 def main():
-    today = datetime.now(timezone.utc).astimezone().date().isoformat()
+    today = datetime.now(ZoneInfo("Asia/Kolkata")).date().isoformat()
     url = f"https://api.notion.com/v1/data_sources/{DATA_SOURCE_ID}/query"
     body = {"page_size": 100}
     pages = []
@@ -81,6 +84,8 @@ def main():
     approved = []
     for page in pages:
         props = page.get("properties", {})
+        if task_date(props) and task_date(props)[:10] != today:
+            continue
         if prop_value(props, "Done") != "Done":
             continue
         if not prop_value(props, "Publish to GitHub"):
@@ -94,21 +99,22 @@ def main():
         approved.append((page["id"], title))
 
     if not approved:
+        Path("/tmp/notion_published_ids.txt").write_text("", encoding="utf-8")
         return
 
     out = Path(f"{today[:4]}/{today[5:7]}/{today}.md")
     out.parent.mkdir(parents=True, exist_ok=True)
     existing = out.read_text(encoding="utf-8") if out.exists() else f"# {today}\n\n## Development & Learning\n"
 
+    publish_ids = []
     for page_id, title in approved:
         line = f"- {title}"
         if line not in existing:
             existing += line + "\n"
-        patch_url = f"https://api.notion.com/v1/pages/{page_id}"
-        patch = {"properties": {"GitHub Status": {"select": {"name": "Published"}}}}
-        requests.patch(patch_url, headers=headers, json=patch, timeout=30).raise_for_status()
+        publish_ids.append(page_id)
 
     out.write_text(existing.rstrip() + "\n", encoding="utf-8")
+    Path("/tmp/notion_published_ids.txt").write_text("\n".join(publish_ids) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":
