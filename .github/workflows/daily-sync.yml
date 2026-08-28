@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -43,7 +43,7 @@ jobs:
             echo "No approved activity to publish."
             echo "published=false" >> "$GITHUB_OUTPUT"
           else
-            git commit -m "chore: daily activity $(date -u +%Y-%m-%d)"
+            git commit -m "chore: daily activity $(TZ='Asia/Kolkata' date +%Y-%m-%d)"
             git push
             echo "published=true" >> "$GITHUB_OUTPUT"
           fi
