@@ -1,7 +1,5 @@
 import os
-from datetime import datetime
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import requests
 
@@ -18,11 +16,7 @@ headers = {
 
 def rich_text_title(page):
     title = page.get("properties", {}).get("Task", {}).get("title", [])
-
-    return "".join(
-        item.get("plain_text", "")
-        for item in title
-    ).strip()
+    return "".join(item.get("plain_text", "") for item in title).strip()
 
 
 def prop_value(props, name):
@@ -31,52 +25,27 @@ def prop_value(props, name):
 
     if property_type == "checkbox":
         return property_data.get("checkbox", False)
-
     if property_type == "status":
         return (property_data.get("status") or {}).get("name")
-
     if property_type == "select":
         return (property_data.get("select") or {}).get("name")
-
     return None
 
 
 def task_date(props):
-    """
-    Get the Notion Date property.
-
-    Returns:
-        YYYY-MM-DD
-
-    Example:
-        2026-08-16
-    """
-
+    """Return the task's own Date property as YYYY-MM-DD (or None)."""
     date_property = props.get("Date") or {}
     date_data = date_property.get("date") or {}
     start = date_data.get("start")
-
     if not start:
         return None
-
     return start[:10]
 
 
 def fetch_all_pages():
-    """
-    Fetch every page from the Notion data source.
-    Handles pagination automatically.
-    """
-
-    url = (
-        f"https://api.notion.com/v1/"
-        f"data_sources/{DATA_SOURCE_ID}/query"
-    )
-
-    body = {
-        "page_size": 100,
-        "result_type": "page",
-    }
+    """Fetch every page from the Notion data source (handles pagination)."""
+    url = f"https://api.notion.com/v1/data_sources/{DATA_SOURCE_ID}/query"
+    body = {"page_size": 100, "result_type": "page"}
 
     pages = []
     cursor = None
@@ -85,24 +54,15 @@ def fetch_all_pages():
         if cursor:
             body["start_cursor"] = cursor
 
-        response = requests.post(
-            url,
-            headers=headers,
-            json=body,
-            timeout=30,
-        )
+        response = requests.post(url, headers=headers, json=body, timeout=30)
 
         if not response.ok:
             raise RuntimeError(
-                f"Notion API {response.status_code}: "
-                f"{response.text}"
+                f"Notion API {response.status_code}: {response.text}"
             )
 
         data = response.json()
-
-        pages.extend(
-            data.get("results", [])
-        )
+        pages.extend(data.get("results", []))
 
         if not data.get("has_more"):
             break
@@ -113,173 +73,80 @@ def fetch_all_pages():
 
 
 def main():
-    # ---------------------------------------------------------
-    # TODAY
-    # ---------------------------------------------------------
-
-    today = (
-        datetime.now(
-            ZoneInfo("Asia/Kolkata")
-        )
-        .date()
-        .isoformat()
-    )
-
-    print(f"Syncing Notion tasks for: {today}")
-
-    # ---------------------------------------------------------
-    # FETCH NOTION
-    # ---------------------------------------------------------
-
     pages = fetch_all_pages()
 
     # ---------------------------------------------------------
-    # ONLY TODAY'S PUBLISHED TASKS
+    # GROUP APPROVED TASKS BY THEIR OWN DATE
     #
-    # IMPORTANT:
-    #
-    # Date = today
-    # Publish to GitHub = checked
-    #
-    # Nothing else matters.
-    #
-    # We DO NOT check:
-    # - Done
-    # - GitHub Status
-    # - private/public keywords
-    # - programming keywords
+    # The publishing switch is still "Publish to GitHub".
+    # But we no longer care what day it is *right now* — each
+    # task is filed under its own Date property. This removes
+    # the IST/UTC midnight-drift bug entirely: a run that fires
+    # late (or catches up days later) still lands correctly.
     # ---------------------------------------------------------
 
-    today_tasks = []
+    tasks_by_date = {}  # "YYYY-MM-DD" -> [titles]
+    ids_by_date = {}    # "YYYY-MM-DD" -> [page ids]
 
     for page in pages:
         props = page.get("properties", {})
 
-        # Ignore tasks from other dates.
-        page_date = task_date(props)
-
-        if page_date != today:
+        if not prop_value(props, "Publish to GitHub"):
             continue
 
-        # This is the ONLY publishing switch.
-        if not prop_value(
-            props,
-            "Publish to GitHub",
-        ):
+        day = task_date(props)
+        if not day:
             continue
 
         title = rich_text_title(page)
-
         if not title:
             continue
 
-        today_tasks.append(
-            title
-        )
+        tasks_by_date.setdefault(day, []).append(title)
+        ids_by_date.setdefault(day, []).append(page["id"])
 
     # ---------------------------------------------------------
-    # TODAY'S GITHUB FILE
-    # ---------------------------------------------------------
-
-    output_file = Path(
-        f"{today[:4]}/"
-        f"{today[5:7]}/"
-        f"{today}.md"
-    )
-
-    output_file.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    # ---------------------------------------------------------
-    # READ EXISTING TODAY FILE
+    # WRITE EACH DAY'S FILE
     #
-    # IMPORTANT:
-    #
-    # We ONLY touch today's file.
-    #
-    # Old files are never opened, changed, deleted,
-    # or synchronized.
+    # A file is only created/updated when it gains a NEW line.
+    # An empty day is never written, so it can never produce a
+    # misleading "empty header" commit.
     # ---------------------------------------------------------
 
-    if output_file.exists():
-        existing = output_file.read_text(
-            encoding="utf-8"
-        )
-    else:
-        existing = (
-            f"# {today}\n\n"
-            "## Development & Learning\n"
-        )
+    published_ids = []
+    written = 0
 
-    # ---------------------------------------------------------
-    # ADD TODAY'S SELECTED TASKS
-    #
-    # Existing lines are preserved.
-    # A task is only added if it isn't already present.
-    # ---------------------------------------------------------
+    for day, titles in sorted(tasks_by_date.items()):
+        output_file = Path(f"{day[:4]}/{day[5:7]}/{day}.md")
 
-    for title in today_tasks:
-        line = f"- {title}"
+        if output_file.exists():
+            existing = output_file.read_text(encoding="utf-8")
+        else:
+            existing = f"# {day}\n\n## Development & Learning\n"
 
-        if line not in existing:
-            existing += line + "\n"
+        changed = False
+        for title in titles:
+            line = f"- {title}"
+            if line not in existing:
+                existing += line + "\n"
+                changed = True
 
-    # ---------------------------------------------------------
-    # WRITE ONLY TODAY'S FILE
-    # ---------------------------------------------------------
+        # Nothing new for this day → leave the file untouched.
+        if not changed:
+            continue
 
-    output_file.write_text(
-        existing.rstrip() + "\n",
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        output_file.write_text(existing.rstrip() + "\n", encoding="utf-8")
+
+        published_ids.extend(ids_by_date[day])
+        written += len(titles)
+
+    Path("/tmp/notion_published_ids.txt").write_text(
+        "\n".join(published_ids) + ("\n" if published_ids else ""),
         encoding="utf-8",
     )
 
-    # ---------------------------------------------------------
-    # SAVE TODAY'S PUBLISHED PAGE IDS
-    #
-    # Keep this file compatible with the rest of the workflow.
-    # ---------------------------------------------------------
-
-    today_page_ids = []
-
-    for page in pages:
-        props = page.get("properties", {})
-
-        if task_date(props) != today:
-            continue
-
-        if not prop_value(
-            props,
-            "Publish to GitHub",
-        ):
-            continue
-
-        title = rich_text_title(page)
-
-        if not title:
-            continue
-
-        today_page_ids.append(
-            page["id"]
-        )
-
-    Path(
-        "/tmp/notion_published_ids.txt"
-    ).write_text(
-        "\n".join(today_page_ids)
-        + (
-            "\n"
-            if today_page_ids
-            else ""
-        ),
-        encoding="utf-8",
-    )
-
-    print(
-        f"Synced {len(today_tasks)} task(s) "
-        f"to {output_file}"
-    )
+    print(f"Synced {written} new task(s) across {len(tasks_by_date)} day(s).")
 
 
 if __name__ == "__main__":
