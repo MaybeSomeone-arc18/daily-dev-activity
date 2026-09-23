@@ -1,4 +1,5 @@
 import os
+import time
 from pathlib import Path
 
 import requests
@@ -12,6 +13,9 @@ headers = {
     "Notion-Version": "2026-03-11",
     "Content-Type": "application/json",
 }
+
+MAX_RETRIES = 5
+BASE_BACKOFF_SECONDS = 2
 
 
 def rich_text_title(page):
@@ -42,10 +46,61 @@ def task_date(props):
     return start[:10]
 
 
+def post_with_retry(url, body):
+    last_status = None
+    last_text = None
+
+    for attempt in range(MAX_RETRIES + 1):
+        response = requests.post(
+            url,
+            headers=headers,
+            json=body,
+            timeout=30,
+        )
+
+        if response.ok:
+            return response
+
+        last_status = response.status_code
+        last_text = response.text
+
+        # Retry transient failures, especially the Notion 503 datastore timeout
+        # seen when the API's connection pool is temporarily exhausted.
+        if response.status_code not in {429, 500, 502, 503, 504}:
+            response.raise_for_status()
+
+        if attempt == MAX_RETRIES:
+            break
+
+        retry_after = response.headers.get("Retry-After")
+        if retry_after:
+            try:
+                delay = max(float(retry_after), 0.0)
+            except ValueError:
+                delay = BASE_BACKOFF_SECONDS * (2**attempt)
+        else:
+            delay = BASE_BACKOFF_SECONDS * (2**attempt)
+
+        # Deterministic jitter keeps this safe in CI without adding randomness
+        # to the workflow output.
+        delay += 0.25 * (attempt + 1)
+        print(
+            f"Notion API {response.status_code}; retrying in "
+            f"{delay:.2f}s (attempt {attempt + 1}/{MAX_RETRIES})..."
+        )
+        time.sleep(delay)
+
+    raise RuntimeError(
+        f"Notion API {last_status} after {MAX_RETRIES + 1} attempts: {last_text}"
+    )
+
+
 def fetch_all_pages():
     """Fetch every page from the Notion data source (handles pagination)."""
     url = f"https://api.notion.com/v1/data_sources/{DATA_SOURCE_ID}/query"
-    body = {"page_size": 100, "result_type": "page"}
+    # Keep page_size below the maximum because Notion explicitly recommends
+    # reducing page_size for transient datastore/connection-pool timeouts.
+    body = {"page_size": 50, "result_type": "page"}
 
     pages = []
     cursor = None
@@ -54,13 +109,7 @@ def fetch_all_pages():
         if cursor:
             body["start_cursor"] = cursor
 
-        response = requests.post(url, headers=headers, json=body, timeout=30)
-
-        if not response.ok:
-            raise RuntimeError(
-                f"Notion API {response.status_code}: {response.text}"
-            )
-
+        response = post_with_retry(url, body)
         data = response.json()
         pages.extend(data.get("results", []))
 
@@ -68,6 +117,8 @@ def fetch_all_pages():
             break
 
         cursor = data.get("next_cursor")
+        if not cursor:
+            break
 
     return pages
 
@@ -77,12 +128,6 @@ def main():
 
     # ---------------------------------------------------------
     # GROUP APPROVED TASKS BY THEIR OWN DATE
-    #
-    # The publishing switch is still "Publish to GitHub".
-    # But we no longer care what day it is *right now* — each
-    # task is filed under its own Date property. This removes
-    # the IST/UTC midnight-drift bug entirely: a run that fires
-    # late (or catches up days later) still lands correctly.
     # ---------------------------------------------------------
 
     tasks_by_date = {}  # "YYYY-MM-DD" -> [titles]
@@ -107,10 +152,6 @@ def main():
 
     # ---------------------------------------------------------
     # WRITE EACH DAY'S FILE
-    #
-    # A file is only created/updated when it gains a NEW line.
-    # An empty day is never written, so it can never produce a
-    # misleading "empty header" commit.
     # ---------------------------------------------------------
 
     published_ids = []
@@ -125,21 +166,23 @@ def main():
             existing = f"# {day}\n\n## Development & Learning\n"
 
         changed = False
-        for title in titles:
+        day_published_ids = []
+
+        for title, page_id in zip(titles, ids_by_date[day]):
             line = f"- {title}"
             if line not in existing:
                 existing += line + "\n"
                 changed = True
+                day_published_ids.append(page_id)
 
-        # Nothing new for this day → leave the file untouched.
         if not changed:
             continue
 
         output_file.parent.mkdir(parents=True, exist_ok=True)
         output_file.write_text(existing.rstrip() + "\n", encoding="utf-8")
 
-        published_ids.extend(ids_by_date[day])
-        written += len(titles)
+        published_ids.extend(day_published_ids)
+        written += len(day_published_ids)
 
     Path("/tmp/notion_published_ids.txt").write_text(
         "\n".join(published_ids) + ("\n" if published_ids else ""),
