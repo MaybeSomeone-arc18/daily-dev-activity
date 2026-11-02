@@ -63,11 +63,8 @@ def is_public_technical_task(props, title):
     if not title or PRIVATE_OR_NONTECHNICAL.search(title):
         return False
 
-    category = prop_value(props, "Category")
-    if category in {"Build", "Learn"}:
-        return True
-
-    # When Category is unset, require an unmistakably technical task title.
+    # Category is useful context, not proof that a task is public-safe.
+    # Require an unmistakably technical title even when Category is set.
     return bool(TECHNICAL_TITLE.search(title))
 
 
