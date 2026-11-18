@@ -24,6 +24,9 @@ jobs:
       - name: Install dependencies
         run: pip install requests
 
+      - name: Test publication rules
+        run: python -m unittest discover -s scripts -p 'test_*.py' -v
+
       - name: Sync approved Notion tasks
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
