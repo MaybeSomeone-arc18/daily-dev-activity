@@ -2,6 +2,7 @@ import os
 import re
 import time
 from pathlib import Path
+from datetime import date
 
 import requests
 
@@ -17,17 +18,12 @@ headers = {
 
 MAX_RETRIES = 5
 BASE_BACKOFF_SECONDS = 2
+# Do not release old selections when repairing the publication rules.
+# Earlier dates require a separately reviewed backfill. Existing logs stay intact.
+PUBLISH_FROM_DATE = "2026-11-18"
 
-# A checked box is necessary, but not sufficient: only completed, clearly
-# technical work is eligible for the public activity log.
-TECHNICAL_TITLE = re.compile(
-    r"\b(code|coding|programming|software|develop(?:ment)?|implement(?:ation)?|"
-    r"debug(?:ging)?|api|backend|frontend|database|dsa|java|python|javascript|"
-    r"typescript|react|node(?:\.js)?|git(?:hub)?|open[ -]?arc|taskflow|"
-    r"ai|ml|machine learning|llm|model|deploy(?:ment)?|testing|microproject|"
-    r"technical research|build|bug fix|pull request|pr review)\b",
-    re.IGNORECASE,
-)
+# Explicit publication approval is the gate. Do not guess technical intent
+# from title keywords: short project names and course abbreviations are valid.
 PRIVATE_OR_NONTECHNICAL = re.compile(
     r"\b(journal|diary|personal|relationship|family|friend|meeting|call|"
     r"travel|flight|ticket|packing|pg|house|rent|shopping|grocery|"
@@ -55,17 +51,22 @@ def prop_value(props, name):
     return None
 
 
-def is_public_technical_task(props, title):
-    if prop_value(props, "Done") != "Done":
-        return False
+def exclusion_reason(props, title):
     if not prop_value(props, "Publish to GitHub"):
-        return False
-    if not title or PRIVATE_OR_NONTECHNICAL.search(title):
-        return False
+        return "not_selected"
+    # Support checkbox and status/select completion schemas.
+    # Never treat an arbitrary nonempty status as done.
+    if prop_value(props, "Done") not in (True, "Done"):
+        return "not_done"
+    if not title:
+        return "empty_title"
+    if PRIVATE_OR_NONTECHNICAL.search(title):
+        return "private_title"
+    return None
 
-    # Category is useful context, not proof that a task is public-safe.
-    # Require an unmistakably technical title even when Category is set.
-    return bool(TECHNICAL_TITLE.search(title))
+
+def is_public_technical_task(props, title):
+    return exclusion_reason(props, title) is None
 
 
 def task_date(props):
@@ -124,16 +125,33 @@ def fetch_all_pages():
 def main():
     pages = fetch_all_pages()
     tasks_by_date, ids_by_date = {}, {}
+    counts = {"fetched": len(pages), "not_selected": 0, "not_done": 0,
+              "empty_title": 0, "private_title": 0, "invalid_date": 0, "historical_held": 0, "eligible": 0}
 
+    completion_types = {}
     for page in pages:
         props = page.get("properties", {})
+        completion_type = (props.get("Done") or {}).get("type", "missing")
+        completion_types[completion_type] = completion_types.get(completion_type, 0) + 1
         title = rich_text_title(page)
-        if not is_public_technical_task(props, title):
+        reason = exclusion_reason(props, title)
+        if reason:
+            counts[reason] += 1
             continue
 
         day = task_date(props)
-        if not day:
+        if not day or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", day):
+            counts["invalid_date"] += 1
             continue
+        try:
+            date.fromisoformat(day)
+        except ValueError:
+            counts["invalid_date"] += 1
+            continue
+        if day < PUBLISH_FROM_DATE:
+            counts["historical_held"] += 1
+            continue
+        counts["eligible"] += 1
 
         tasks_by_date.setdefault(day, []).append(title)
         ids_by_date.setdefault(day, []).append(page["id"])
@@ -146,11 +164,13 @@ def main():
             f"# {day}\n\n## Development & Learning\n"
         )
 
+        existing_lines = set(existing.splitlines())
         changed, day_published_ids = False, []
         for title, page_id in zip(titles, ids_by_date[day]):
-            line = f"- {title}"
-            if line not in existing:
+            line = "- " + " ".join(title.splitlines())
+            if line not in existing_lines:
                 existing += line + "\n"
+                existing_lines.add(line)
                 changed = True
                 day_published_ids.append(page_id)
 
@@ -166,7 +186,10 @@ def main():
         "\n".join(published_ids) + ("\n" if published_ids else ""),
         encoding="utf-8",
     )
-    print(f"Synced {written} approved technical task(s) across {len(tasks_by_date)} day(s).")
+    # Counts only: private Notion task titles must not appear in public CI logs.
+    print("Completion property types: " + ", ".join(f"{key}={value}" for key, value in sorted(completion_types.items())))
+    print("Task counts: " + ", ".join(f"{key}={value}" for key, value in counts.items()))
+    print(f"Synced {written} approved task(s) across {len(tasks_by_date)} day(s).")
 
 
 if __name__ == "__main__":
